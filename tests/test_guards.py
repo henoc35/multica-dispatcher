@@ -59,4 +59,13 @@ for _ in range(10):
     S.record_dispatch("a", sim)
 check("13. simulation : jamais de mise de côté ni de plafond journalier", S.issue_ok(sim)[0] and "s1" not in S.state.issues)
 d.DRY_RUN = False
+
+# state written by an older version (no format version): discarded
+import json as _json, pathlib as _pl
+old = _pl.Path(tempfile.mktemp(suffix=".json"))
+old.write_text(_json.dumps({"issues": {"x": {"no_progress": 9, "last_dispatch": 1, "signature": "s", "day_dispatches": []}}}))
+check("14. historique d'une ancienne version (sans numéro) : ignoré", d.State(old).issues == {})
+new = _pl.Path(tempfile.mktemp(suffix=".json"))
+st = d.State(new); st.entry("y"); st.save()
+check("15. historique au format actuel : conservé", "y" in d.State(new).issues)
 sys.exit(0 if ok else 1)
