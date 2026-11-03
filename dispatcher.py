@@ -189,21 +189,34 @@ def last_run_verdict(issue: dict, last_task: dict | None) -> tuple[bool, str]:
 
 # ---------------------------------------------------------------- persistent state
 class State:
-    """Per-issue dispatch history (cooldown, no-progress parking), persisted to disk."""
+    """Per-issue dispatch history (cooldown, no-progress parking), persisted to disk.
+
+    The file carries a format version. Files without it were written by versions that also
+    counted simulated launches (DRY_RUN=1) as real ones; their parking is meaningless, so
+    they are discarded once and the history starts clean."""
+
+    VERSION = 2
 
     def __init__(self, path: Path):
         self.path = path
         self.issues: dict[str, dict] = {}
         try:
-            self.issues = json.loads(path.read_text()).get("issues", {})
+            data = json.loads(path.read_text())
         except (OSError, ValueError):
-            pass
+            return
+        if data.get("version") == self.VERSION:
+            self.issues = data.get("issues", {})
+        elif data.get("issues"):
+            log.warning("historique d'une version précédente ignoré (%d issues) : il pouvait contenir "
+                        "des mises de côté issues de la simulation. Nouveau départ.", len(data["issues"]))
+            if not DRY_RUN:
+                self.save()
 
     def save(self):
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"issues": self.issues}, indent=1))
+            tmp.write_text(json.dumps({"version": self.VERSION, "issues": self.issues}, indent=1))
             tmp.replace(self.path)
         except OSError as e:
             log.warning("state not saved: %s", e)
