@@ -1,0 +1,36 @@
+# Déploiement Coolify : « Docker Compose » pointant sur ce dépôt (ou ce dossier).
+# Renseigne les variables dans Coolify → Environment Variables (voir .env.example).
+services:
+  multica-dispatcher:
+    build: .
+    restart: unless-stopped
+    environment:
+      MULTICA_SERVER_URL: ${MULTICA_SERVER_URL}
+      MULTICA_WORKSPACES: ${MULTICA_WORKSPACES:-all}
+      EXCLUDE_WORKSPACES: ${EXCLUDE_WORKSPACES:-}
+      MULTICA_WORKSPACE_ID: ${MULTICA_WORKSPACE_ID:-}
+      MULTICA_TOKEN: ${MULTICA_TOKEN}
+      DRY_RUN: ${DRY_RUN:-1}
+      AGENTS: ${AGENTS:-}
+      REVIEWER_AGENTS: ${REVIEWER_AGENTS:-qa-lead,security-lead,seo-lead}
+      REVIEW_PRIORITY_LIMIT: ${REVIEW_PRIORITY_LIMIT:-10}
+      EXCLUDE_STATUS_REGEX: ${EXCLUDE_STATUS_REGEX:-question|test}
+      RECONCILE_SECONDS: ${RECONCILE_SECONDS:-60}
+      MAX_DISPATCH_PER_AGENT_PER_HOUR: ${MAX_DISPATCH_PER_AGENT_PER_HOUR:-20}
+      MAX_DISPATCH_PER_ISSUE_PER_DAY: ${MAX_DISPATCH_PER_ISSUE_PER_DAY:-8}
+      ISSUE_COOLDOWN_SECONDS: ${ISSUE_COOLDOWN_SECONDS:-300}
+      NO_PROGRESS_LIMIT: ${NO_PROGRESS_LIMIT:-3}
+      ACTIVITY_GRACE_SECONDS: ${ACTIVITY_GRACE_SECONDS:-120}
+      FAILURE_BREAKER_COUNT: ${FAILURE_BREAKER_COUNT:-3}
+      FAILURE_BREAKER_WINDOW: ${FAILURE_BREAKER_WINDOW:-600}
+      FAILURE_BREAKER_PAUSE: ${FAILURE_BREAKER_PAUSE:-900}
+      MULTICA_WS_URL: ${MULTICA_WS_URL:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - dispatcher-data:/data
+    # Pas de port public : /health et /status restent internes (healthcheck Coolify).
+    expose:
+      - "8080"
+
+volumes:
+  dispatcher-data:
