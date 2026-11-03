@@ -1,6 +1,6 @@
 """Unit tests for the dispatcher's safety guards."""
 import importlib, os, sys, tempfile, time
-os.environ.update(MULTICA_SERVER_URL="http://x", MULTICA_WORKSPACE_ID="w", MULTICA_TOKEN="t",
+os.environ.update(MULTICA_SERVER_URL="http://x", MULTICA_WORKSPACE_ID="w", MULTICA_TOKEN="t", DRY_RUN="0",
                   STATE_FILE=tempfile.mktemp(suffix=".json"), NO_PROGRESS_LIMIT="3",
                   MAX_DISPATCH_PER_ISSUE_PER_DAY="5", ISSUE_COOLDOWN_SECONDS="0",
                   FAILURE_BREAKER_COUNT="3", FAILURE_BREAKER_PAUSE="900")
@@ -46,4 +46,17 @@ d.AGENTS = {"qa-lead", "beta/Mika"}
 check("11. filtre d'agents global et par workspace",
       d.agent_followed({"id": "w1", "slug": "alpha"}, "qa-lead") and d.agent_followed({"id": "w2", "slug": "beta"}, "Mika")
       and not d.agent_followed({"id": "w1", "slug": "alpha"}, "Mika"))
+
+# simulation must not poison the real history
+d.DRY_RUN = True
+S = d.WorkspaceDispatcher({"id": "w", "slug": "alpha"}, d.State(d.STATE_FILE))
+d.ISSUE_COOLDOWN_SECONDS = 300
+sim = {"id": "s1", "status": "todo", "assignee_id": "a", "revision": 1}
+S.record_dispatch("a", sim)
+check("12. simulation : délai respecté (pas la même ligne à chaque passage)", not S.issue_ok(sim)[0])
+d.ISSUE_COOLDOWN_SECONDS = 0
+for _ in range(10):
+    S.record_dispatch("a", sim)
+check("13. simulation : jamais de mise de côté ni de plafond journalier", S.issue_ok(sim)[0] and "s1" not in S.state.issues)
+d.DRY_RUN = False
 sys.exit(0 if ok else 1)

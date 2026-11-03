@@ -88,6 +88,23 @@ Cette commande affiche, pour chaque workspace :
 - les agents en pause ;
 - les issues mises de côté.
 
+## Vérifier en simulation (`DRY_RUN=1`)
+
+En simulation, le service décide comme en réel mais ne lance rien. Il n'écrit rien non plus dans l'historique : pas de mise de côté, pas de plafond journalier, `state.json` intact. Le passage à `DRY_RUN=0` part donc d'un historique propre. Seul le délai entre deux relances (`ISSUE_COOLDOWN_SECONDS`, 5 minutes) est appliqué : une issue qui reste éligible réapparaît dans les journaux toutes les 5 minutes, c'est normal puisque rien n'a été lancé.
+
+`/status` liste les 50 dernières relances simulées par workspace (`simulated_launches`).
+
+| Vérification | Comment | Attendu |
+| --- | --- | --- |
+| Chaque ligne « lancerait » est juste | Ouvre l'issue dans Multica | Assignée à cet agent, « À faire » ou « En cours » (ou « En relecture » pour un relecteur), aucune exécution en cours, pas dans Question ni Test après déploiement |
+| Rien de bloquant n'est relancé | Cherche dans les journaux une issue en Question, À planifier, Test après déploiement, ou annulée par toi | Elle n'apparaît jamais |
+| Capacité respectée | Compte les lignes d'un agent sur un même passage | Pas plus que ses places libres (`max_concurrent_tasks` moins ses exécutions actives et en file) |
+| Réaction aux événements | Passe une issue d'un agent de « À faire » à « En cours » | Ligne « lancerait … (issue modifiée ; …) » en moins de 5 secondes, sauf si l'issue est déjà dans son délai de 5 minutes |
+| Fin d'exécution | Attends qu'un agent termine | Ligne « (task:completed ; …) » pour sa tâche suivante |
+| Une exécution démarre | Relance une issue à la main dans Multica | Elle disparaît des lignes « lancerait » |
+| Mode relecture prioritaire | `/status` | `review_priority_mode: true` dès que plus de `REVIEW_PRIORITY_LIMIT` relectures ; aucune « À faire » des agents non relecteurs |
+| Reconnexion | Redéploie, ou attends une coupure | `temps réel déconnecté …` suivi de `temps réel connecté` en quelques secondes |
+
 ## Lancer sans Docker (test local)
 
 ```bash
@@ -106,7 +123,7 @@ Sans variables `MULTICA_*`, le script lit `~/.multica/config.json`.
 Les tests tournent sur un faux serveur Multica local, avec l'API et le WebSocket, et ne font aucun appel réel :
 
 - **25 vérifications de bout en bout** : priorités, colonnes exclues, exécution échouée, exécution annulée par un humain, agent qui attend, relecture, lancement immédiat sur événement, mode relecture prioritaire, simulation ; et en multi-workspace : découverte automatique, exclusion, mode relecture isolé par workspace, événement routé vers le bon workspace, aucune relance envoyée au mauvais workspace, liste explicite par slug, filtre d'agent par workspace, ancien réglage mono-workspace ;
-- **11 tests unitaires** : garde-fous et sélection des workspaces.
+- **13 tests unitaires** : garde-fous, sélection des workspaces, simulation sans effet sur l'historique.
 
 ## Où il se branche dans Multica
 

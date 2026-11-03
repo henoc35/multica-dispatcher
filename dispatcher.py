@@ -268,6 +268,8 @@ class WorkspaceDispatcher:
         self.failures: dict[str, deque] = defaultdict(deque)        # agent_id -> failure timestamps
         self.paused_until: dict[str, float] = {}
         self.review_count = 0
+        self.sim_last: dict[str, float] = {}       # DRY_RUN only: issue_id -> simulated launch time
+        self.simulated: deque = deque(maxlen=50)   # DRY_RUN only: latest simulated launches
         self.ws_connected = False
         self.listener: asyncio.Task | None = None
 
@@ -334,8 +336,14 @@ class WorkspaceDispatcher:
         return f'{issue.get("status")}|{issue.get("assignee_id")}|{issue.get("revision")}'
 
     def issue_ok(self, issue: dict) -> tuple[bool, str]:
-        e = self.state.entry(issue["id"])
         now = time.time()
+        if DRY_RUN and now - self.sim_last.get(issue["id"], 0) < ISSUE_COOLDOWN_SECONDS:
+            return False, "délai entre deux relances"
+        if DRY_RUN:   # read-only view of the real history: the simulation never writes to it
+            e = {"last_dispatch": 0, "signature": "", "no_progress": 0, "day_dispatches": [],
+                 **self.state.issues.get(issue["id"], {})}
+        else:
+            e = self.state.entry(issue["id"])
         e["day_dispatches"] = [t for t in e["day_dispatches"] if now - t < 86400]
         if e["signature"] and self.signature(issue) != e["signature"]:
             e["no_progress"] = 0                      # the issue moved: progress made
@@ -349,6 +357,13 @@ class WorkspaceDispatcher:
         return True, ""
 
     def record_dispatch(self, agent_id: str, issue: dict):
+        if DRY_RUN:
+            # Simulation: nothing really ran, so the issue cannot have moved. Only the cooldown
+            # is kept (in memory) to avoid repeating the same line every pass; no-progress
+            # parking, daily caps and the state file are left untouched, so switching to
+            # DRY_RUN=0 starts from a clean history.
+            self.sim_last[issue["id"]] = time.time()
+            return
         e = self.state.entry(issue["id"])
         sig = self.signature(issue)
         e["no_progress"] = e["no_progress"] + 1 if e["last_dispatch"] and e["signature"] == sig else 0
@@ -424,6 +439,9 @@ class WorkspaceDispatcher:
                          f"({reason} ; {issue.get('_why', '')})")
                 if DRY_RUN:
                     log.info("[simulation] lancerait %s", label)
+                    self.simulated.append({"at": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                                           "agent": agent["name"], "issue": issue["identifier"],
+                                           "reason": f"{reason} ; {issue.get('_why', '')}"})
                     self.record_dispatch(agent_id, issue)
                     continue
                 try:
@@ -521,6 +539,7 @@ class WorkspaceDispatcher:
                 "dispatches_last_hour": len([t for t in self.dispatch_log[i] if now - t < 3600]),
                 "paused_for_s": max(0, int(self.paused_until.get(i, 0) - now)),
             } for i, a in self.agents.items()},
+            **({"simulated_launches": list(self.simulated)} if DRY_RUN else {}),
             "parked_issues": sorted(v.get("identifier") or k for k, v in self.state.issues.items()
                                     if v.get("workspace") == self.id and v.get("no_progress", 0) >= NO_PROGRESS_LIMIT),
         }
