@@ -99,7 +99,7 @@ def scenario4():
     check("21. ... et rien de neuf dans alpha", len(reruns("ws1")) == before_a)
     with fm.LOCK:
         check("22. aucune relance envoyée au mauvais workspace", not fm.STATE.get("cross_workspace"))
-log4 = run({"EXCLUDE_WORKSPACES": "archive", "REVIEW_PRIORITY_LIMIT": "2"}, 3, scenario4)
+log4 = run({"EXCLUDE_WORKSPACES": "archive,gamma", "REVIEW_PRIORITY_LIMIT": "2"}, 3, scenario4)
 
 # ---------- scenario 5: explicit list by slug + per-workspace agent filter
 fm.reset()
@@ -108,7 +108,43 @@ def scenario5():
     check("24. AGENTS=beta/frontend-lead : seul cet agent de beta est relancé", reruns("ws2") == [("fe2", "Y-4")])
 log5 = run({"MULTICA_WORKSPACES": "beta", "AGENTS": "beta/frontend-lead"}, 3, scenario5)
 
+# ---------- scenario 6: reviews left with the leads are handed to qa-lead
+fm.reset()
+def assignments(workspace="ws4"):
+    with fm.LOCK:
+        return [(i, a) for w, i, a in fm.STATE["assignments"] if w == workspace]
+def scenario6():
+    a = assignments()
+    check("25. 2 places libres chez qa-lead -> les 2 relectures les plus anciennes lui sont confiées",
+          a == [("G-2", "qa4"), ("G-4", "qa4")])
+    check("26. jamais l'issue sur laquelle le lead travaille encore (G-3)", ("G-3", "qa4") not in a)
+    check("27. jamais une relecture assignée à une personne (G-6) ni « Test après déploiement » (G-7)",
+          ("G-6", "qa4") not in a and ("G-7", "qa4") not in a)
+    check("28. qa-lead complet : G-5 attend", ("G-5", "qa4") not in a)
+    # qa-lead finishes one review: a slot frees up, G-5 moves right away (event-driven)
+    with fm.LOCK:
+        fm.STATE["ws"]["ws4"]["tasks"]["qa4"][0].update(status="completed", completed_at=fm.iso())
+        next(i for i in fm.STATE["ws"]["ws4"]["issues"] if i["id"] == "g1")["status"] = "done"
+    fm.emit({"type": "task:completed", "payload": {"task_id": "q1", "agent_id": "qa4", "issue_id": "g1"}}, "ws4")
+    time.sleep(4)
+    check("29. fin d'une relecture de qa-lead -> la suivante (G-5) lui est confiée aussitôt", ("G-5", "qa4") in assignments())
+    check("30. /status compte les relectures confiées", status()["workspaces"]["gamma"]["reviews_handed_over"] == 3)
+    check("31. rien n'est réassigné ailleurs", assignments("ws1") == [] and assignments("ws2") == [])
+log6 = run({"MULTICA_WORKSPACES": "gamma"}, 3, scenario6)
+
+fm.reset()
+def scenario7():
+    check("32. REVIEW_ASSIGNEE vide : aucun responsable changé", assignments() == [])
+log7 = run({"MULTICA_WORKSPACES": "gamma", "REVIEW_ASSIGNEE": ""}, 3, scenario7)
+
+fm.reset()
+def scenario8():
+    check("33. DRY_RUN=1 : aucun transfert réel", assignments() == [])
+log8 = run({"MULTICA_WORKSPACES": "gamma", "DRY_RUN": "1"}, 3, scenario8)
+
 print("--- journal (scénario 1) ---"); print(log1)
 print("--- journal (scénario 3, simulation) ---"); print(log3)
 print("--- journal (scénario 4, multi-workspace) ---"); print(log4)
+print("--- journal (scénario 6, transfert des relectures) ---"); print(log6)
+print("--- journal (scénario 8, simulation du transfert) ---"); print(log8)
 sys.exit(0 if ok else 1)

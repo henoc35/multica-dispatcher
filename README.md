@@ -50,6 +50,16 @@ Les issues sont prises par priorité (urgente, haute, moyenne, basse, aucune), p
 
 **Mode relecture prioritaire.** Au-delà de `REVIEW_PRIORITY_LIMIT` issues en relecture dans un workspace (10 par défaut), les agents de ce workspace qui ne relisent pas ne démarrent plus de nouvelle tâche « À faire ». Ils reprennent seulement leur travail « En cours », dont les corrections demandées. Les relecteurs, eux, continuent.
 
+**Transfert des relectures.** Le service relance l'agent assigné, mais une relecture restée chez le lead qui a fait le travail n'est relancée pour personne. Le service la confie donc à `REVIEW_ASSIGNEE` (`qa-lead` par défaut) :
+
+- seulement dans la limite des places libres de qa-lead (`max_concurrent_tasks` moins ses exécutions actives et en file) ; les suivantes partent dès qu'une de ses relectures se termine, ou au rattrapage ;
+- les plus prioritaires puis les plus anciennes d'abord ;
+- jamais une issue sur laquelle le lead a encore une exécution en cours ou en file ;
+- jamais une issue assignée à une personne, non assignée, déjà chez un relecteur (`REVIEWER_AGENTS`), ni dans une colonne exclue (« Test après déploiement », « Question ») ;
+- l'assignation suffit : Multica lance alors lui-même l'exécution de qa-lead.
+
+Avec `REVIEW_ASSIGNEE=` (vide), le service ne change jamais le responsable d'une issue. `/status` indique le nombre de relectures confiées depuis le démarrage (`reviews_handed_over`).
+
 ## Garde-fous
 
 | Garde-fou | Défaut | Effet |
@@ -122,7 +132,7 @@ Sans variables `MULTICA_*`, le script lit `~/.multica/config.json`.
 
 Les tests tournent sur un faux serveur Multica local, avec l'API et le WebSocket, et ne font aucun appel réel :
 
-- **25 vérifications de bout en bout** : priorités, colonnes exclues, exécution échouée, exécution annulée par un humain, agent qui attend, relecture, lancement immédiat sur événement, mode relecture prioritaire, simulation ; et en multi-workspace : découverte automatique, exclusion, mode relecture isolé par workspace, événement routé vers le bon workspace, aucune relance envoyée au mauvais workspace, liste explicite par slug, filtre d'agent par workspace, ancien réglage mono-workspace ;
+- **34 vérifications de bout en bout** : priorités, colonnes exclues, exécution échouée, exécution annulée par un humain, agent qui attend, relecture, lancement immédiat sur événement, mode relecture prioritaire, simulation ; et en multi-workspace : découverte automatique, exclusion, mode relecture isolé par workspace, événement routé vers le bon workspace, aucune relance envoyée au mauvais workspace, liste explicite par slug, filtre d'agent par workspace, ancien réglage mono-workspace ; transfert des relectures à qa-lead dans sa capacité, relais immédiat à la fin d'une relecture, issues protégées (lead encore au travail, personne, colonnes exclues), transfert désactivable, simulation ;
 - **13 tests unitaires** : garde-fous, sélection des workspaces, simulation sans effet sur l'historique.
 
 ## Où il se branche dans Multica
@@ -132,6 +142,7 @@ Tout passe par l'API publique de Multica, vérifiée dans son code source en ver
 - **Workspaces** : `GET /api/workspaces`, la liste de ceux dont le token est membre. Chaque appel suivant porte l'en-tête `X-Workspace-ID` du workspace concerné.
 - **Écoute** : une connexion WebSocket `/ws?workspace_id=…` par workspace, avec un premier message d'authentification `{"type":"auth","payload":{"token":…}}`, et les événements `task:completed`, `task:failed`, `task:cancelled` et `issue:updated`.
 - **Lecture** : `GET /api/agents`, `GET /api/agents/{id}/tasks` et `GET /api/issues?assignee_id=…&open_only=true`.
+- **Transfert d'une relecture** : `PUT /api/issues/{id}` avec `{"assignee_type":"agent","assignee_id":…}`, le même appel que `multica issue assign`.
 - **Lancement** : `POST /api/issues/{id}/rerun`. Attention, cet appel annule une exécution en cours sur l'issue. C'est pour ça que le service vérifie juste avant qu'il n'y en a aucune.
 
 Les lancements apparaissent dans Multica comme faits par toi, puisque le service utilise ton token.
