@@ -18,7 +18,27 @@ def issue(id_, ident, title, status, prio, agent, updated, status_name="", categ
 def reset():
     STATE.clear()
     STATE["reruns"] = []        # (workspace, agent, identifier, time)
-    STATE["ws"] = {"ws1": ws1(), "ws2": ws2(), "ws3": ws3()}
+    STATE["ws"] = {"ws1": ws1(), "ws2": ws2(), "ws3": ws3(), "ws4": ws4()}
+    STATE["assignments"] = []   # (workspace, identifier, new assignee)
+
+def ws4():
+    """Reviews left with the leads: the dispatcher hands them to qa-lead within its capacity."""
+    return {"meta": {"id": "ws4", "slug": "gamma", "name": "Projet Gamma"},
+            "agents": [{"id": "qa4", "name": "qa-lead", "max_concurrent_tasks": 3},
+                       {"id": "be4", "name": "backend-lead", "max_concurrent_tasks": 2},
+                       {"id": "fe4", "name": "frontend-lead", "max_concurrent_tasks": 2}],
+            "tasks": {"qa4": [{"id": "q1", "status": "running", "issue_id": "g1", "created_at": iso(-300)}],
+                      "be4": [{"id": "b1", "status": "running", "issue_id": "g3", "created_at": iso(-200)}],
+                      "fe4": []},
+            "issues": [
+                issue("g1", "G-1", "review in progress by qa", "in_review", "medium", "qa4", iso(-300)),
+                issue("g2", "G-2", "review left with backend (oldest)", "in_review", "medium", "be4", iso(-90000)),
+                issue("g3", "G-3", "backend still working on it", "in_review", "medium", "be4", iso(-95000)),
+                issue("g4", "G-4", "review left with frontend", "in_review", "medium", "fe4", iso(-80000)),
+                issue("g5", "G-5", "review left with frontend (newest)", "in_review", "medium", "fe4", iso(-70000)),
+                dict(issue("g6", "G-6", "review assigned to a person", "in_review", "urgent", "u9", iso(-99000)), assignee_type="member"),
+                issue("g7", "G-7", "test after deploy", "test_1", "urgent", "be4", iso(-99999), "Test après déploiement", "in_review"),
+            ]}
 
 def ws3():
     """An archived project the dispatcher must ignore when excluded."""
@@ -124,6 +144,27 @@ class H(BaseHTTPRequestHandler):
                 STATE["reruns"].append((W["meta"]["id"], iss["assignee_id"], iss["identifier"], time.time()))
                 W["tasks"][iss["assignee_id"]].append({"id": f"t{len(STATE['reruns'])+100}", "status": "queued", "issue_id": iss["id"]})
             return self._send({"id": "newtask"})
+        self._send({"error": "not found"}, 404)
+    def do_PUT(self):
+        W = self._ws()
+        if not W: return self._send({"error": "unauthorized"}, 401)
+        n = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(n) or b"{}")
+        parts = self.path.split("/")
+        if len(parts) == 4 and parts[2] == "issues":
+            with LOCK:
+                iss = next((i for i in W["issues"] if i["id"] == parts[3]), None)
+                if iss is None:
+                    STATE.setdefault("cross_workspace", []).append(parts[3])
+                    return self._send({"error": "issue not found"}, 404)
+                if "assignee_id" in body:
+                    iss["assignee_id"] = body["assignee_id"]; iss["assignee_type"] = body.get("assignee_type")
+                    iss["revision"] += 1; iss["updated_at"] = iso()
+                    STATE["assignments"].append((W["meta"]["id"], iss["identifier"], body["assignee_id"]))
+                    # like Multica: assigning an agent queues a run for it
+                    W["tasks"].setdefault(body["assignee_id"], []).append(
+                        {"id": f"a{len(STATE['assignments'])}", "status": "queued", "issue_id": iss["id"], "created_at": iso()})
+            return self._send(iss)
         self._send({"error": "not found"}, 404)
     def log_message(self, *a): pass
 

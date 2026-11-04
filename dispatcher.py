@@ -78,6 +78,9 @@ DRY_RUN = env("DRY_RUN", "1") == "1"
 AGENTS = {a.strip() for a in env("AGENTS").split(",") if a.strip()}  # empty = all agents
 REVIEWER_AGENTS = {a.strip() for a in env("REVIEWER_AGENTS", "qa-lead,security-lead,seo-lead").split(",") if a.strip()}
 REVIEW_PRIORITY_LIMIT = env_int("REVIEW_PRIORITY_LIMIT", 10)
+# Reviews left with a non-reviewer agent (the lead who did the work) are handed to this agent,
+# within its free capacity. Empty = never change an assignee.
+REVIEW_ASSIGNEE = env("REVIEW_ASSIGNEE", "qa-lead")
 EXCLUDE_STATUS_REGEX = re.compile(env("EXCLUDE_STATUS_REGEX", "question|test"), re.IGNORECASE)
 RECONCILE_SECONDS = env_int("RECONCILE_SECONDS", 60)
 DEBOUNCE_SECONDS = env_int("DEBOUNCE_SECONDS", 3)
@@ -281,6 +284,7 @@ class WorkspaceDispatcher:
         self.failures: dict[str, deque] = defaultdict(deque)        # agent_id -> failure timestamps
         self.paused_until: dict[str, float] = {}
         self.review_count = 0
+        self.handed_over = 0                       # reviews handed to REVIEW_ASSIGNEE since start
         self.sim_last: dict[str, float] = {}       # DRY_RUN only: issue_id -> simulated launch time
         self.simulated: deque = deque(maxlen=50)   # DRY_RUN only: latest simulated launches
         self.ws_connected = False
@@ -486,6 +490,94 @@ class WorkspaceDispatcher:
         await self.refresh_review_count()
         for agent_id in list(self.agents):
             await self.dispatch_agent(agent_id, "rattrapage")
+        await self.hand_over_reviews("rattrapage")
+
+    # ---------- review hand-over
+    def review_agent(self) -> dict | None:
+        if not REVIEW_ASSIGNEE:
+            return None
+        return next((a for a in self.agents.values() if a["name"] == REVIEW_ASSIGNEE), None)
+
+    async def hand_over_reviews(self, reason: str):
+        """Give the reviewer the reviews still assigned to the agent who did the work.
+        Multica starts a run on assignment; never more than the reviewer's free capacity, so the
+        rest waits and moves as soon as a review ends (task:completed of the reviewer)."""
+        reviewer = self.review_agent()
+        if not reviewer or time.time() < self.paused_until.get(reviewer["id"], 0):
+            return
+        async with self.locks[reviewer["id"]]:     # same lock as its dispatch: one decision at a time
+            try:
+                tasks = objects_with(await self.call("GET", f"/api/agents/{reviewer['id']}/tasks", query={"limit": 100}), "id", "status")
+                issues = await self.open_issues()
+            except ApiError as e:
+                log.warning("[%s] transfert des relectures : lecture impossible (%s)", self.label, e)
+                return
+            capacity = int(reviewer.get("max_concurrent_tasks") or 1)
+            free = capacity - sum(1 for t in tasks if t["status"] in ACTIVE_TASK | PENDING_TASK)
+            if free <= 0:
+                return
+            reviewer_names = REVIEWER_AGENTS | {REVIEW_ASSIGNEE}
+            waiting = []
+            for i in issues:
+                name = i.get("status_name", "") or ""
+                if i.get("status") != "in_review" or (name and EXCLUDE_STATUS_REGEX.search(name)):
+                    continue
+                if i.get("assignee_type") != "agent" or not i.get("assignee_id"):
+                    continue                        # a person or nobody: not ours to move
+                owner = self.agents.get(i["assignee_id"])
+                if owner is None or owner["name"] in reviewer_names:
+                    continue
+                waiting.append(i)
+            if not waiting:
+                return
+            waiting.sort(key=lambda i: (PRIORITY_RANK.get(i.get("priority", ""), 4), i.get("updated_at", "")))
+            busy_cache: dict[str, set] = {}
+            moved = 0
+            for issue in waiting:
+                if moved >= free:
+                    break
+                if not self.hourly_ok(reviewer["id"]):
+                    log.warning("[%s] %s : plafond de %d lancements/heure atteint", self.label, REVIEW_ASSIGNEE, MAX_DISPATCH_PER_AGENT_PER_HOUR)
+                    break
+                owner_id = issue["assignee_id"]
+                if owner_id not in busy_cache:     # never take an issue its owner is still working on
+                    try:
+                        owner_tasks = objects_with(await self.call("GET", f"/api/agents/{owner_id}/tasks", query={"limit": 100}), "id", "status")
+                    except ApiError as e:
+                        log.warning("[%s] transfert : tâches de %s illisibles (%s)", self.label, self.agents[owner_id]["name"], e)
+                        continue
+                    busy_cache[owner_id] = {t.get("issue_id") for t in owner_tasks if t["status"] in ACTIVE_TASK | PENDING_TASK}
+                if issue["id"] in busy_cache[owner_id]:
+                    continue
+                label = (f"[{self.label}] {issue['identifier']} « {issue.get('title', '')[:60]} » : "
+                         f"{self.agents[owner_id]['name']} → {REVIEW_ASSIGNEE} ({reason})")
+                if DRY_RUN:
+                    log.info("[simulation] confierait la relecture %s", label)
+                    self.simulated.append({"at": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                                           "agent": REVIEW_ASSIGNEE, "issue": issue["identifier"],
+                                           "reason": f"relecture transférée depuis {self.agents[owner_id]['name']}"})
+                    moved += 1
+                    continue
+                try:
+                    await self.call("PUT", f"/api/issues/{issue['id']}",
+                                    body={"assignee_type": "agent", "assignee_id": reviewer["id"]})
+                    log.info("relecture confiée %s", label)
+                    self.dispatch_log[reviewer["id"]].append(time.time())
+                    self.handed_over += 1
+                    moved += 1
+                except ApiError as e:
+                    log.warning("échec du transfert %s : %s", label, e)
+                    self.note_failure(reviewer["id"])
+
+    def schedule_hand_over(self, reason: str):
+        if not self.review_agent():
+            return
+        loop = asyncio.get_running_loop()
+        if "__reviews__" in self.pending:
+            self.pending["__reviews__"].cancel()
+        # after the reviewer's own dispatch (same debounce + 1s), so its pending work goes first
+        self.pending["__reviews__"] = loop.call_later(
+            DEBOUNCE_SECONDS + 1, lambda: asyncio.ensure_future(self.hand_over_reviews(reason)))
 
     # ---------- realtime events
     def handle_event(self, msg: dict):
@@ -497,10 +589,15 @@ class WorkspaceDispatcher:
                     return                                   # Multica retries on its own
                 self.note_failure(agent_id)
             self.schedule(agent_id, etype)
+            reviewer = self.review_agent()
+            if reviewer and agent_id == reviewer["id"]:
+                self.schedule_hand_over(f"{etype} de {REVIEW_ASSIGNEE}")
         elif etype == "issue:updated" and (payload.get("status_changed") or payload.get("assignee_changed")):
             issue = payload.get("issue") or {}
             if issue.get("status") == "in_review" or payload.get("prev_status") == "in_review":
                 asyncio.ensure_future(self.refresh_review_count())
+            if issue.get("status") == "in_review":
+                self.schedule_hand_over("issue passée en relecture")
             if issue.get("assignee_type") == "agent" and issue.get("assignee_id"):
                 self.schedule(issue["assignee_id"], "issue modifiée")
 
@@ -548,6 +645,7 @@ class WorkspaceDispatcher:
             "realtime_connected": self.ws_connected,
             "review_count": self.review_count,
             "review_priority_mode": self.review_count > REVIEW_PRIORITY_LIMIT,
+            "reviews_handed_over": self.handed_over,
             "agents": {a["name"]: {
                 "dispatches_last_hour": len([t for t in self.dispatch_log[i] if now - t < 3600]),
                 "paused_for_s": max(0, int(self.paused_until.get(i, 0) - now)),
